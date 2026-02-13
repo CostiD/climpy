@@ -1,25 +1,13 @@
 [build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.backends.legacy:build"
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "climpy"
 version = "0.2.0"
-description = "A clean Python toolkit for climate data preprocessing, analysis and publication-quality plotting."
-readme = "README.md"
+description = "Climate data preprocessing, analysis and publication-quality plotting."
 requires-python = ">=3.9"
-dependencies = [
-    "numpy>=1.22",
-    "xarray>=2022.6",
-    "pandas>=1.4",
-    "matplotlib>=3.5",
-    "cartopy>=0.20",
-    "scipy>=1.8",
-    "eofs>=1.4",
-]
-
-[project.optional-dependencies]
-dev = ["pytest", "black", "ruff"]
+dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["."]
