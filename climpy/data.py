@@ -332,68 +332,54 @@ def annual_means(
 
 def seasonal_means(
     da: xr.DataArray,
-    months: list[int],
+    months: list,
     time_dim: str = "time",
 ) -> xr.DataArray:
-    """Compute multi-month seasonal means (annual cycle removed first).
+    """Compute multi-month seasonal means.
 
-    For seasons that span two calendar years (e.g. DJFM: months [12,1,2,3]),
-    the output year label corresponds to the year of January.
+    For cross-year seasons (e.g. DJFM: [12,1,2,3]),
+    December is labelled as belonging to the following year.
 
     Parameters
     ----------
-    da : xr.DataArray with monthly 'time' coordinate.
-    months : list of int
-        Month numbers, e.g. [12, 1, 2, 3] for DJFM, [6, 7, 8, 9] for JJAS.
+    da     : xr.DataArray with monthly 'time' coordinate.
+    months : list of int, e.g. [12, 1, 2, 3] for DJFM.
 
     Returns
     -------
     xr.DataArray with 'year' coordinate (int).
-
-    Examples
-    --------
-    >>> djfm = seasonal_means(anom, months=[12, 1, 2, 3])
-    >>> jjas  = seasonal_means(anom, months=[6, 7, 8, 9])
     """
     months_set = set(months)
-    n_months = len(months)
+    n_months   = len(months)
 
     # Select only the desired months
     da_sel = da.sel({time_dim: da[time_dim].dt.month.isin(months_set)})
 
-    # For cross-year seasons shift December to the following year
-    # so that groupby.year gives consistent year labels.
-    if 12 in months_set and any(m < 6 for m in months_set):
-        # Cross-year season: shift time so Dec belongs to next year
-        shifted = da_sel.assign_coords(
-            {time_dim: da_sel[time_dim].dt.year
-                        + (da_sel[time_dim].dt.month == 12).astype(int)}
+    # Build a "season year" label as a NEW coordinate (don't overwrite time)
+    is_cross_year = 12 in months_set and any(m < 6 for m in months_set)
+
+    if is_cross_year:
+        # December gets relabelled to year+1 so it groups with Jan/Feb/Mar
+        season_year = (
+            da_sel[time_dim].dt.year
+            + (da_sel[time_dim].dt.month == 12).astype(int)
         )
-        seas = shifted.groupby(time_dim).mean(time_dim)
     else:
-        # Same-year season
-        seas = da_sel.groupby(f"{time_dim}.year").mean(time_dim)
-        seas = seas.rename({"year": time_dim})
-        seas = seas.assign_coords({time_dim: seas[time_dim].values})
-        seas = seas.rename({time_dim: "year"})
-        return seas
+        season_year = da_sel[time_dim].dt.year
+
+    da_sel = da_sel.assign_coords(season_year=season_year)
+
+    # Group by the new coordinate
+    seas   = da_sel.groupby("season_year").mean(time_dim)
+    counts = da_sel.groupby("season_year").count(time_dim)
 
     # Mask years with incomplete seasons
-    counts = da_sel.copy()
-    if 12 in months_set and any(m < 6 for m in months_set):
-        counts_shifted = da_sel.assign_coords(
-            {time_dim: da_sel[time_dim].dt.year
-                        + (da_sel[time_dim].dt.month == 12).astype(int)}
-        )
-        count_ann = counts_shifted.groupby(time_dim).count(time_dim)
-    else:
-        count_ann = da_sel.groupby(f"{time_dim}.year").count(time_dim)
-        count_ann = count_ann.rename({"year": time_dim})
+    seas = seas.where(counts >= n_months)
+    seas = seas.dropna("season_year", how="all")
 
-    seas = seas.where(count_ann >= n_months)
-    seas = seas.dropna(time_dim, how="all")
-    seas.attrs = {**da.attrs,
-                  "description": f"Seasonal means ({months})"}
+    # Rename to 'year' for consistency with annual_means
+    seas = seas.rename({"season_year": "year"})
+    seas.attrs = {**da.attrs, "description": f"Seasonal means (months={months})"}
     return seas
 
 
