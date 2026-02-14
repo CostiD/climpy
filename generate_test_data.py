@@ -108,8 +108,9 @@ for t in range(T):
 
 # Maschează pământul (aprox.) — NaN pentru latitudini mari la unele longitudini
 land_mask = np.zeros((nlat_s, nlon_s), dtype=bool)
-land_mask[lat2d_s > 70, lon2d_s > -10] = True   # Scandinavia / N. Europa
-land_mask[lat2d_s < 10, lon2d_s > 10]  = True   # Africa de Vest
+# DUPĂ — corect:
+land_mask[(lat2d_s > 70) & (lon2d_s > -10)] = True   # Scandinavia / N. Europa
+land_mask[(lat2d_s < 10) & (lon2d_s > 10)]  = True   # Africa de Vest
 sst[:, land_mask] = np.nan
 
 sst_da = xr.DataArray(
