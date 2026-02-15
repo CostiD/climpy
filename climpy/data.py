@@ -329,57 +329,52 @@ def annual_means(
     ann.attrs = {**da.attrs, "description": "Annual means"}
     return ann
 
-
 def seasonal_means(
     da: xr.DataArray,
     months: list,
     time_dim: str = "time",
 ) -> xr.DataArray:
-    """Compute multi-month seasonal means.
+    """Compute multi-month seasonal means."""
+    import pandas as pd
 
-    For cross-year seasons (e.g. DJFM: [12,1,2,3]),
-    December is labelled as belonging to the following year.
-
-    Parameters
-    ----------
-    da     : xr.DataArray with monthly 'time' coordinate.
-    months : list of int, e.g. [12, 1, 2, 3] for DJFM.
-
-    Returns
-    -------
-    xr.DataArray with 'year' coordinate (int).
-    """
     months_set = set(months)
     n_months   = len(months)
 
-    # Select only the desired months
-    da_sel = da.sel({time_dim: da[time_dim].dt.month.isin(months_set)})
+    # Filtrare cu pandas — evită problemele cu xarray.dt.isin
+    time_pd   = pd.DatetimeIndex(da[time_dim].values)
+    month_mask = np.isin(time_pd.month, list(months_set))
+    da_sel    = da.isel({time_dim: month_mask})
 
-    # Build a "season year" label as a NEW coordinate (don't overwrite time)
+    if da_sel.sizes[time_dim] == 0:
+        raise ValueError(f"Nu există date pentru lunile {months}.")
+
+    # Etichete de an sezonier
+    time_sel = pd.DatetimeIndex(da_sel[time_dim].values)
     is_cross_year = 12 in months_set and any(m < 6 for m in months_set)
 
     if is_cross_year:
-        # December gets relabelled to year+1 so it groups with Jan/Feb/Mar
-        season_year = (
-            da_sel[time_dim].dt.year
-            + (da_sel[time_dim].dt.month == 12).astype(int)
-        )
+        season_years = time_sel.year + (time_sel.month == 12).astype(int)
     else:
-        season_year = da_sel[time_dim].dt.year
+        season_years = time_sel.year
 
-    da_sel = da_sel.assign_coords(season_year=season_year)
+    # Grupare manuală — evită orice groupby din xarray
+    unique_years = np.unique(season_years)
+    slices = []
+    valid_years = []
 
-    # Group by the new coordinate
-    seas   = da_sel.groupby("season_year").mean(time_dim)
-    counts = da_sel.groupby("season_year").count(time_dim)
+    for yr in unique_years:
+        mask  = season_years == yr
+        count = int(mask.sum())
+        chunk = da_sel.isel({time_dim: mask}).mean(time_dim)
+        if count < n_months:
+            chunk = chunk * np.nan   # sezon incomplet → NaN
+        slices.append(chunk)
+        valid_years.append(yr)
 
-    # Mask years with incomplete seasons
-    seas = seas.where(counts >= n_months)
-    seas = seas.dropna("season_year", how="all")
-
-    # Rename to 'year' for consistency with annual_means
-    seas = seas.rename({"season_year": "year"})
-    seas.attrs = {**da.attrs, "description": f"Seasonal means (months={months})"}
+    seas = xr.concat(slices, dim="year")
+    seas["year"] = np.array(valid_years, dtype=int)
+    seas.attrs   = {**da.attrs,
+                    "description": f"Seasonal means (months={months})"}
     return seas
 
 
