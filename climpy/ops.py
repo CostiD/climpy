@@ -31,7 +31,7 @@ def moving_average(da, n, dim=None, center=True, min_periods=None):
     if min_periods is None:
         min_periods = n
     return da.rolling({dim: n}, center=center, min_periods=min_periods).mean()
-
+MA = moving_average   # alias
 
 # ── Lag utilities ─────────────────────────────────────────────────────
 
