@@ -546,7 +546,7 @@ def preprocess(
 
     # 3. Standardise coords
     ds = standardise_coords(ds,
-                             time=time_coord, lat=lat_coord, lon=lon_coord)
+                             time=time_coord, lat=lat_coord, lon=lon_coord, var=var)
 
     # 4. Fix longitudes
     ds = set_lon_convention(ds, convention=lon_convention)
