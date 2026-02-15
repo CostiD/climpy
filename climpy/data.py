@@ -317,9 +317,9 @@ def annual_means(
     -------
     xr.DataArray indexed by integer year.
     """
-    ann = da.resample({time_dim: "AS"}).mean(time_dim)
+    ann = da.resample({time_dim: "YS"}).mean(time_dim)
     # Mark partial years at edges as NaN
-    counts = da.resample({time_dim: "AS"}).count(time_dim)
+    counts = da.resample({time_dim: "YS"}).count(time_dim)
     ann = ann.where(counts >= 12)
     ann = ann.dropna(time_dim, how="all")
 
