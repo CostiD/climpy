@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Optional
 import numpy as np
+import pandas as pd
 import xarray as xr
 from eofs.xarray import Eof as _Eof
 
@@ -56,29 +57,59 @@ class EOF:
     """
 
     def __init__(
-        self,
-        da: xr.DataArray,
-        n_eofs: Optional[int] = None,
-        min_variance: float = 70.0,
-        lat_weights: bool = True,
-        time_dim: str = "time",
-    ):
-        self._da = da
-        self._time_dim = time_dim
+    self,
+    da: xr.DataArray,
+    n_eofs=None,
+    min_variance: float = 70.0,
+    lat_weights: bool = True,
+    time_dim: str = None,
+):
+    self._da = da
 
-        # Weights
-        if lat_weights:
-            wgts = cosine_weights(da)
+    # Detectează automat dimensiunea temporală
+    if time_dim is None:
+        if "time" in da.dims:
+            time_dim = "time"
+        elif "year" in da.dims:
+            time_dim = "year"
         else:
-            wgts = None
+            raise ValueError("Nu găsesc o dimensiune temporală ('time' sau 'year').")
+    self._time_dim = time_dim
 
-        self.solver = _Eof(da, weights=wgts)
+    # eofs necesită coordonata să se numească 'time' cu dtype datetime64
+    # Dacă avem 'year' (int), facem o copie temporară cu 'time' datetime64
+    if time_dim != "time" or not np.issubdtype(da[time_dim].dtype, np.datetime64):
+        years = da[time_dim].values.astype(int)
+        fake_time = xr.DataArray(
+            da.values,
+            dims=["time"] + [d for d in da.dims if d != time_dim],
+            coords={
+                "time": pd.date_range(
+                    start=f"{years[0]}-07-01",
+                    periods=len(years),
+                    freq="YS"
+                ),
+                **{k: v for k, v in da.coords.items()
+                   if k != time_dim},
+            },
+        )
+        da_for_eof = fake_time
+    else:
+        da_for_eof = da
 
-        # Choose number of EOFs
-        if n_eofs is None:
-            self.n_eofs = getneofs(self.solver, percent=min_variance)
-        else:
-            self.n_eofs = n_eofs
+    # Weights
+    if lat_weights:
+        wgts = cosine_weights(da_for_eof)
+    else:
+        wgts = None
+
+    self.solver = _Eof(da_for_eof, weights=wgts)
+
+    # Număr de EOFs
+    if n_eofs is None:
+        self.n_eofs = getneofs(self.solver, percent=min_variance)
+    else:
+        self.n_eofs = n_eofs
 
     # ── Main outputs ──────────────────────────────────────────────────
 
