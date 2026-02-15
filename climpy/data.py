@@ -375,6 +375,7 @@ def seasonal_means(
     seas["year"] = np.array(valid_years, dtype=int)
     seas.attrs   = {**da.attrs,
                     "description": f"Seasonal means (months={months})"}
+    seas = seas.dropna("year", how="all")
     return seas
 
 
