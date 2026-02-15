@@ -20,38 +20,17 @@ import xarray as xr
 
 # ── Smoothing ─────────────────────────────────────────────────────────
 
-def moving_average(
-    da: xr.DataArray,
-    n: int,
-    dim: str = "time",
-    center: bool = True,
-    min_periods: int = None,
-) -> xr.DataArray:
-    """Centred (or trailing) n-point moving average.
-
-    Parameters
-    ----------
-    da : xr.DataArray
-    n  : int — window size (years or time steps).
-    dim : str — dimension along which to smooth (default 'time').
-    center : bool — if True (default), window is centred.
-    min_periods : int, optional — minimum number of non-NaN points required.
-
-    Returns
-    -------
-    xr.DataArray, same shape as input (NaN at edges).
-
-    Examples
-    --------
-    >>> pc_smooth = moving_average(pc, n=7)
-    """
+def moving_average(da, n, dim=None, center=True, min_periods=None):
+    if dim is None:
+        if 'year' in da.dims:
+            dim = 'year'
+        elif 'time' in da.dims:
+            dim = 'time'
+        else:
+            raise ValueError("Nu găsesc dimensiunea temporală. Pasează dim= explicit.")
     if min_periods is None:
         min_periods = n
     return da.rolling({dim: n}, center=center, min_periods=min_periods).mean()
-
-
-# Alias for backward compatibility
-MA = moving_average
 
 
 # ── Lag utilities ─────────────────────────────────────────────────────
