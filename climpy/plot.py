@@ -28,7 +28,7 @@ from cartopy.util import add_cyclic_point
 
 # ── Palette ───────────────────────────────────────────────────────────
 
-_LAND_COLOR   = "#D8D3C5"   # warm parchment
+_LAND_COLOR   = "#2E2E2E"   # charcoal
 _OCEAN_COLOR  = "#E6EEF4"   # pale arctic blue
 _COAST_COLOR  = "#7A7670"   # muted warm grey
 _GRID_COLOR   = "#C8C8C8"
