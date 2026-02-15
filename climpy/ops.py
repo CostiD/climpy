@@ -115,24 +115,14 @@ def getneofs(
     percent: float = 70.0,
     max_eofs: int = 100,
 ) -> int:
-    """Return the minimum number of EOFs needed to explain ≥ `percent`% variance.
+    """Return the minimum number of EOFs needed to explain >= percent% variance."""
+    # Numărul maxim de EOFs posibil = min(n_time, n_space) - 1
+    try:
+        n_possible = solver._solver._data.shape[0] - 1
+    except AttributeError:
+        n_possible = max_eofs
+    n = min(max_eofs, n_possible)
 
-    Parameters
-    ----------
-    solver  : eofs.xarray.Eof instance (already fitted).
-    percent : float — target cumulative explained variance (default 70%).
-    max_eofs: int   — upper limit on EOFs to consider (default 100).
-
-    Returns
-    -------
-    int — number of EOFs needed.
-
-    Example
-    -------
-    >>> k = getneofs(eof_solver, percent=70)
-    >>> eofs = eof_solver.eofs(neofs=k, eofscaling=2)
-    """
-    n = min(max_eofs, solver._solver.shape[0] - 1)
     var_fracs = solver.varianceFraction(neigs=n).values * 100.0
     cumvar = np.cumsum(var_fracs)
     idx = int(np.searchsorted(cumvar, percent))
