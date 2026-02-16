@@ -383,29 +383,16 @@ def seasonal_means(
 
 def global_mean(
     da: xr.DataArray,
-    lat_weights: bool = True,
+    lat_weights: bool = False,   # ← schimbat din True în False
 ) -> xr.DataArray:
-    """Compute the area-weighted global (or domain) mean time series.
-
-    Parameters
-    ----------
-    da : xr.DataArray
-        Field with 'lat' and 'lon' dimensions.
-    lat_weights : bool
-        If True (default), weight each grid cell by cos(lat).
-
-    Returns
-    -------
-    xr.DataArray with only the time/year dimension.
-    """
     if lat_weights:
         coslat = np.cos(np.deg2rad(da["lat"])).clip(0.0, 1.0)
         weights = coslat * xr.ones_like(da["lon"])
         gm = da.weighted(weights).mean(("lat", "lon"))
     else:
-        gm = da.mean(("lat", "lon"))
+        gm = da.mean(("lat", "lon"))   # ← simplu, fără ponderi — exact ca originalul
 
-    gm.attrs = {**da.attrs, "description": "Area-weighted global mean"}
+    gm.attrs = {**da.attrs, "description": "Global mean"}
     return gm
 
 
@@ -480,6 +467,7 @@ def preprocess(
     season_months: Optional[list[int]] = None,
     compute_annual: bool = True,
     subtract_gm: bool = False,
+    gm_period: Optional[tuple] = None,   # ← nou: e.g. ('1950-01','2019-12')
     max_nan_fraction: float = 0.25,
     lat_step: int = 1,
     lon_step: int = 1,
@@ -585,14 +573,24 @@ def preprocess(
 
     # 11. Global-mean removal
     if subtract_gm and "annual" in out:
-        gm = global_mean(out["annual"])
-        out["gm"] = gm
-        out["annual_no_gm"] = subtract_global_mean(out["annual"], gm, dim="year")
+    ann_for_gm = out["annual"]
+    if gm_period is not None:
+        ann_for_gm = ann_for_gm.sel(
+            year=slice(int(gm_period[0][:4]), int(gm_period[1][:4]))
+        )
+    gm = global_mean(ann_for_gm)   # neponderat by default
+    out["gm"] = gm
+    out["annual_no_gm"] = subtract_global_mean(out["annual"], gm, dim="year")
 
-        if "seasonal" in out:
-            gm_s = global_mean(out["seasonal"])
-            out["seasonal_no_gm"] = subtract_global_mean(
-                out["seasonal"], gm_s, dim="year"
+    if "seasonal" in out:
+        seas_for_gm = out["seasonal"]
+        if gm_period is not None:
+            seas_for_gm = seas_for_gm.sel(
+                year=slice(int(gm_period[0][:4]), int(gm_period[1][:4]))
             )
+        gm_s = global_mean(seas_for_gm)
+        out["seasonal_no_gm"] = subtract_global_mean(
+            out["seasonal"], gm_s, dim="year"
+        )
 
     return out
