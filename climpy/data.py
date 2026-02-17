@@ -350,13 +350,21 @@ def preprocess(
 
     Returns dict with keys:
         'ds'             : standardised xr.Dataset
-        'da'             : raw DataArray
+        'da'             : raw DataArray (already spatially subsetted)
         'anom'           : monthly anomalies
         'annual'         : annual means (year coordinate)
         'seasonal'       : seasonal means, if season_months given
         'gm'             : global mean time series, if subtract_gm=True
         'annual_no_gm'   : annual means with GW removed, if subtract_gm=True
         'seasonal_no_gm' : seasonal means with GW removed, if subtract_gm=True
+
+    Note on global-mean removal
+    ---------------------------
+    The global mean is computed from the FULL spatial domain (before lat/lon
+    subsetting), exactly as in the original code.  This ensures that the
+    removed signal is a true global-ocean warming trend, not a regional mean.
+    Applying the spatial subset first would leave a residual regional trend
+    in the data and distort the leading EOFs.
     """
     # 1. Load
     ds = load_nc(path, var=var, squeeze=squeeze)
@@ -365,7 +373,7 @@ def preprocess(
     if fix_time_start is not None:
         ds = fix_time(ds, start=fix_time_start, freq=fix_time_freq)
 
-    # 3. Standardise coords  (var= passat explicit ca sa redenumeasca sst→Xdata)
+    # 3. Standardise coords
     ds = standardise_coords(ds,
                              time=time_coord, lat=lat_coord, lon=lon_coord, var=var)
 
@@ -379,51 +387,66 @@ def preprocess(
     if lat_step > 1 or lon_step > 1:
         ds["Xdata"] = reduce_resolution(ds["Xdata"], lat_step, lon_step)
 
-    da = ds["Xdata"]
+    da_full = ds["Xdata"]
 
-    # 7. Subset
-    da = subset(da, time=time, lat=lat, lon=lon)
+    # 7. Temporal subset only (lat/lon subset comes AFTER global-mean removal)
+    da_full = subset(da_full, time=time)
 
-    # 8. Anomalies
-    anom = anomalies(da, ref_period=ref_period)
-    anom = drop_sparse_gridpoints(anom, max_nan_fraction=max_nan_fraction)
+    # 8. Anomalies on full spatial domain
+    anom_full = anomalies(da_full, ref_period=ref_period)
+    anom_full = drop_sparse_gridpoints(anom_full, max_nan_fraction=max_nan_fraction)
 
-    out = {"ds": ds, "da": da, "anom": anom}
-
-    # 9. Annual means
-    if compute_annual:
-        ann = annual_means(anom)
-        ann = drop_sparse_gridpoints(ann, dim="year",
-                                     max_nan_fraction=max_nan_fraction)
-        out["annual"] = ann
-
-    # 10. Seasonal means
-    if season_months is not None:
-        seas = seasonal_means(anom, months=season_months)
-        seas = drop_sparse_gridpoints(seas, dim="year",
-                                      max_nan_fraction=max_nan_fraction)
-        out["seasonal"] = seas
-
-    # 11. Global-mean removal
-    if subtract_gm and "annual" in out:
-        ann_for_gm = out["annual"]
+    # 9. Global-mean removal — must happen before spatial subset
+    #    so that gm is a true global (or full-domain) ocean mean, not a regional one.
+    gm = None
+    if subtract_gm:
+        ann_full = annual_means(anom_full)
+        ann_full = drop_sparse_gridpoints(ann_full, dim="year",
+                                          max_nan_fraction=max_nan_fraction)
+        ann_for_gm = ann_full
         if gm_period is not None:
             ann_for_gm = ann_for_gm.sel(
                 year=slice(int(gm_period[0][:4]), int(gm_period[1][:4]))
             )
         gm = global_mean(ann_for_gm)   # unweighted — matches original code
-        out["gm"] = gm
-        out["annual_no_gm"] = subtract_global_mean(out["annual"], gm, dim="year")
 
-        if "seasonal" in out:
-            seas_for_gm = out["seasonal"]
+    # 10. Now apply spatial subset
+    da   = subset(da_full,   lat=lat, lon=lon)
+    anom = subset(anom_full, lat=lat, lon=lon)
+
+    out = {"ds": ds, "da": da, "anom": anom}
+    if gm is not None:
+        out["gm"] = gm
+
+    # 11. Annual means on subsetted domain
+    if compute_annual:
+        ann = annual_means(anom)
+        ann = drop_sparse_gridpoints(ann, dim="year",
+                                     max_nan_fraction=max_nan_fraction)
+        out["annual"] = ann
+        if subtract_gm:
+            # Subtract the global mean (computed from full domain above)
+            # from the regional annual means — same as original:
+            #   Xmammg = Xma_zone - Xmg_global
+            out["annual_no_gm"] = subtract_global_mean(ann, gm, dim="year")
+
+    # 12. Seasonal means on subsetted domain
+    if season_months is not None:
+        seas = seasonal_means(anom, months=season_months)
+        seas = drop_sparse_gridpoints(seas, dim="year",
+                                      max_nan_fraction=max_nan_fraction)
+        out["seasonal"] = seas
+        if subtract_gm:
+            # For seasonal: compute seasonal gm from full domain, then subtract
+            seas_full = seasonal_means(anom_full, months=season_months)
+            seas_full = drop_sparse_gridpoints(seas_full, dim="year",
+                                               max_nan_fraction=max_nan_fraction)
+            seas_for_gm = seas_full
             if gm_period is not None:
                 seas_for_gm = seas_for_gm.sel(
                     year=slice(int(gm_period[0][:4]), int(gm_period[1][:4]))
                 )
             gm_s = global_mean(seas_for_gm)
-            out["seasonal_no_gm"] = subtract_global_mean(
-                out["seasonal"], gm_s, dim="year"
-            )
+            out["seasonal_no_gm"] = subtract_global_mean(seas, gm_s, dim="year")
 
     return out
