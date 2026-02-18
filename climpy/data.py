@@ -6,18 +6,38 @@ Climate data loading and preprocessing.
 All functions are non-interactive: parameters are passed explicitly.
 This makes scripts reproducible, batch-runnable, and testable.
 
-Typical workflow
-----------------
+Dataset reference — raw vs already-anomalies
+---------------------------------------------
+| Dataset          | Type              | Note                           |
+|------------------|-------------------|--------------------------------|
+| SST ERSSTv5      | raw monthly means | preprocess computes anomalies  |
+| SLP NCEP-R1      | raw monthly means | preprocess computes anomalies  |
+| GPCP v2.3 Precip | raw monthly means | preprocess computes anomalies  |
+| GISTEMP SAT      | already anomalies | use already_anomalies=True     |
+| Berkeley Earth   | already anomalies | use load_berkeley_earth()      |
+
+Typical workflow (raw data)
+----------------------------
 >>> import climpy.data as cd
->>> ds = cd.load_nc("data/sst.nc", var="sst", squeeze="lev")
->>> ds = cd.standardise_coords(ds, time="T", lat="latitude", lon="longitude")
->>> ds = cd.set_lon_convention(ds, convention="[-180,180]")
->>> ds = cd.subset(ds, time=("1950-01", "2020-12"), lat=(0, 80), lon=(-80, 20))
->>> anom = cd.anomalies(ds["sst"], ref_period=("1981-01", "2010-12"))
->>> ann  = cd.annual_means(anom)
->>> seas = cd.seasonal_means(anom, months=[12, 1, 2, 3])   # DJFM
->>> gw   = cd.global_mean(ann)
->>> detrended = cd.subtract_global_mean(ann, gw)
+>>> ds   = cd.load_nc("data/sst.nc", var="sst")
+>>> anom = cd.preprocess("data/sst.nc", var="sst",
+...            lat=(0,80), lon=(-80,20),
+...            time=("1950-01","2020-12"),
+...            ref_period=("1981-01","2010-12"),
+...            subtract_gm=True)['annual_no_gm']
+
+Typical workflow (already-anomaly data — GISTEMP)
+--------------------------------------------------
+>>> result = cd.preprocess("data/sat.nc", var="air",
+...              time=("1979-01","2020-12"),
+...              already_anomalies=True)          # ← no double anomalising
+>>> sat_djfm = cd.seasonal_means(result['anom'], months=[12,1,2,3])
+
+Typical workflow (Berkeley Earth)
+----------------------------------
+>>> da = cd.load_berkeley_earth("data/best.nc",
+...          time=("1979-01","2020-12"))
+>>> sat_djfm = cd.seasonal_means(da, months=[12,1,2,3])
 """
 
 from __future__ import annotations
@@ -30,7 +50,7 @@ import pandas as pd
 import xarray as xr
 
 
-# ── Loading ───────────────────────────────────────────────────────────
+# ── Loading ───────────────────────────────────────────────────────────────────
 
 def load_nc(
     path: Union[str, Path],
@@ -74,7 +94,110 @@ def fix_time(
     return ds
 
 
-# ── Coordinate normalisation ──────────────────────────────────────────
+def load_berkeley_earth(
+    path: Union[str, Path],
+    time: Optional[tuple] = None,
+    lat: Optional[tuple] = None,
+    lon: Optional[tuple] = None,
+    lon_convention: str = "[-180,180]",
+) -> xr.DataArray:
+    """Load Berkeley Earth Land+Ocean gridded temperature (LatLong1 format).
+
+    Berkeley Earth stores time as a decimal year (e.g. 1981.125 = Feb 1981)
+    and uses 'latitude'/'longitude' coordinate names. This function handles
+    all of that transparently and returns a standard climpy DataArray with
+    dims (time, lat, lon) and a proper DatetimeIndex.
+
+    The returned DataArray contains **temperature anomalies** relative to
+    1951-1980 — i.e. it is already an anomaly field, ready to pass directly
+    to ``seasonal_means`` or ``annual_means`` without calling ``anomalies()``.
+
+    Parameters
+    ----------
+    path           : Path to the Berkeley Earth NetCDF file.
+    time           : Optional (start, end) tuple of strings e.g. ('1979-01', '2020-12').
+    lat            : Optional (lat_min, lat_max) tuple.
+    lon            : Optional (lon_min, lon_max) tuple.
+    lon_convention : '[-180,180]' (default) or '[0,360]'.
+
+    Returns
+    -------
+    xr.DataArray — (time, lat, lon), anomalies in °C rel. 1951-1980.
+
+    Download URL
+    ------------
+    https://berkeley-earth-temperature.s3.amazonaws.com/Global/Gridded/Land_and_Ocean_LatLong1.nc
+
+    Example
+    -------
+    >>> da = load_berkeley_earth('data/best.nc', time=('1979-01','2020-12'))
+    >>> sat_djfm = climpy.seasonal_means(da, months=[12,1,2,3])
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Berkeley Earth file not found: {path}")
+
+    # Berkeley Earth time is decimal year: 1981.125 → Feb 1981
+    # decode_times=False prevents xarray from choking on "year A.D." units
+    ds = xr.open_dataset(path, decode_times=False)
+
+    # Convert decimal-year time → proper DatetimeIndex
+    dec_years = ds["time"].values.astype(float)
+    years      = dec_years.astype(int)
+    # fraction of year → month index (0-based)
+    months_f   = (dec_years - years) * 12.0
+    months_i   = np.round(months_f).astype(int) % 12  # 0 = Jan
+    dates = pd.to_datetime(
+        [f"{y}-{m+1:02d}-01" for y, m in zip(years, months_i)]
+    )
+    ds["time"] = dates
+
+    # Rename Berkeley Earth coords to climpy standard
+    rename = {}
+    if "latitude"  in ds.coords: rename["latitude"]  = "lat"
+    if "longitude" in ds.coords: rename["longitude"] = "lon"
+    if rename:
+        ds = ds.rename(rename)
+
+    da = ds["temperature"]
+
+    # Sort lat/lon
+    if "lat" in da.coords:
+        da = da.isel(lat=np.argsort(da["lat"].values))
+    if "lon" in da.coords:
+        da = da.isel(lon=np.argsort(da["lon"].values))
+
+    # Longitude convention
+    lon_vals = da["lon"].values
+    if lon_convention == "[-180,180]" and lon_vals.max() > 180:
+        da = da.assign_coords(lon=(((lon_vals + 180) % 360) - 180))
+        da = da.sortby("lon")
+    elif lon_convention == "[0,360]" and lon_vals.min() < 0:
+        da = da.assign_coords(lon=(lon_vals % 360))
+        da = da.sortby("lon")
+
+    # Temporal subset
+    if time is not None:
+        da = da.sel(time=slice(str(time[0]), str(time[1])))
+
+    # Spatial subset
+    sel = {}
+    if lat is not None:
+        sel["lat"] = slice(float(lat[0]), float(lat[1]))
+    if lon is not None:
+        sel["lon"] = slice(float(lon[0]), float(lon[1]))
+    if sel:
+        da = da.sel(sel)
+
+    da.attrs["description"] = (
+        "Berkeley Earth Land+Ocean temperature anomaly "
+        "(°C, relative to 1951-1980 baseline)"
+    )
+    da.attrs["source"] = "Berkeley Earth, Land_and_Ocean_LatLong1.nc"
+    return da
+
+
+# ── Coordinate normalisation ──────────────────────────────────────────────────
 
 def standardise_coords(
     ds: xr.Dataset,
@@ -149,7 +272,7 @@ def mask_fill_values(
     return ds
 
 
-# ── Spatial and temporal subsetting ──────────────────────────────────
+# ── Spatial and temporal subsetting ──────────────────────────────────────────
 
 def subset(
     ds: Union[xr.Dataset, xr.DataArray],
@@ -180,7 +303,7 @@ def reduce_resolution(
                    lon=slice(None, None, lon_step))
 
 
-# ── Anomalies ─────────────────────────────────────────────────────────
+# ── Anomalies ─────────────────────────────────────────────────────────────────
 
 def anomalies(
     da: xr.DataArray,
@@ -188,7 +311,23 @@ def anomalies(
 ) -> xr.DataArray:
     """Compute monthly anomalies by subtracting the monthly climatology.
 
-    anom[i,t] = SST_raw[i,t] - mean(SST_raw[i, months in ref_period matching month t])
+    anom[i,t] = da[i,t] - mean(da[i, months in ref_period matching month t])
+
+    Parameters
+    ----------
+    da         : xr.DataArray with a 'time' dimension.
+    ref_period : (start, end) strings for climatology, e.g. ('1981-01','2010-12').
+                 If None, uses the full time range.
+
+    Returns
+    -------
+    xr.DataArray — monthly anomalies.
+
+    Note
+    ----
+    Do NOT call this on datasets that are already anomalies (e.g. GISTEMP,
+    Berkeley Earth). Use ``preprocess(..., already_anomalies=True)`` or
+    ``load_berkeley_earth()`` instead.
     """
     if ref_period is not None:
         ref = da.sel(time=slice(str(ref_period[0]), str(ref_period[1])))
@@ -201,7 +340,7 @@ def anomalies(
     return anom
 
 
-# ── Temporal averaging ────────────────────────────────────────────────
+# ── Temporal averaging ────────────────────────────────────────────────────────
 
 def annual_means(
     da: xr.DataArray,
@@ -209,7 +348,6 @@ def annual_means(
 ) -> xr.DataArray:
     """Compute annual (calendar-year) means.
 
-    annual[i,j] = mean(anom[i, months in year j])
     Only years with all 12 months present receive a valid value.
     """
     ann = da.resample({time_dim: "YS"}).mean(time_dim)
@@ -260,25 +398,24 @@ def seasonal_means(
         slices.append(chunk)
         valid_years.append(yr)
 
-    seas          = xr.concat(slices, dim="year")
-    seas["year"]  = np.array(valid_years, dtype=int)
-    seas.attrs    = {**da.attrs, "description": f"Seasonal means (months={months})"}
-    seas          = seas.dropna("year", how="all")
+    seas         = xr.concat(slices, dim="year")
+    seas["year"] = np.array(valid_years, dtype=int)
+    seas.attrs   = {**da.attrs, "description": f"Seasonal means (months={months})"}
+    seas         = seas.dropna("year", how="all")
     return seas
 
 
-# ── Global mean removal ───────────────────────────────────────────────
+# ── Global mean removal ───────────────────────────────────────────────────────
 
 def global_mean(
     da: xr.DataArray,
-    lat_weights: bool = False,
+    lat_weights: bool = True,
 ) -> xr.DataArray:
     """Compute the spatial mean time series.
 
-    lat_weights=False (default): simple unweighted mean — matches original code.
-    lat_weights=True: area-weighted mean with cos(lat).
-
-    global_mean[j] = mean over all spatial points i of da[i,j]
+    lat_weights=True (default): area-weighted mean with cos(lat).
+        Physically correct — cells at higher latitudes cover less area.
+    lat_weights=False: simple unweighted mean (for backward compatibility).
     """
     if lat_weights:
         coslat  = np.cos(np.deg2rad(da["lat"])).clip(0.0, 1.0)
@@ -296,10 +433,7 @@ def subtract_global_mean(
     gm: xr.DataArray,
     dim: str = "year",
 ) -> xr.DataArray:
-    """Subtract a global-mean time series from every grid point.
-
-    annual_no_gm[i,j] = annual[i,j] - global_mean[j]
-    """
+    """Subtract a global-mean time series from every grid point."""
     result = da - gm
     result.attrs = {
         **da.attrs,
@@ -308,7 +442,7 @@ def subtract_global_mean(
     return result
 
 
-# ── NaN handling ──────────────────────────────────────────────────────
+# ── NaN handling ──────────────────────────────────────────────────────────────
 
 def drop_sparse_gridpoints(
     da: xr.DataArray,
@@ -320,7 +454,7 @@ def drop_sparse_gridpoints(
     return da.where(nan_frac <= max_nan_fraction)
 
 
-# ── Convenience wrapper ───────────────────────────────────────────────
+# ── Main preprocessing wrapper ────────────────────────────────────────────────
 
 def preprocess(
     path: Union[str, Path],
@@ -336,6 +470,7 @@ def preprocess(
     lat: Optional[tuple] = None,
     lon: Optional[tuple] = None,
     ref_period: Optional[tuple] = None,
+    already_anomalies: bool = False,
     season_months: Optional[list] = None,
     compute_annual: bool = True,
     subtract_gm: bool = False,
@@ -348,23 +483,40 @@ def preprocess(
 ) -> dict:
     """One-stop preprocessing function.
 
+    Parameters
+    ----------
+    already_anomalies : bool, default False
+        Set True when the input dataset is already an anomaly field
+        (e.g. GISTEMP SAT, Berkeley Earth temperature).
+        When True, the ``anomalies()`` step is skipped entirely — the
+        data is used as-is for all downstream steps.
+        When False (default), monthly anomalies are computed from the
+        raw data using ``ref_period`` as the climatology baseline.
+
     Returns dict with keys:
         'ds'             : standardised xr.Dataset
-        'da'             : raw DataArray (already spatially subsetted)
-        'anom'           : monthly anomalies
+        'da'             : raw DataArray (spatially subsetted, NOT anomalised)
+        'anom'           : anomaly DataArray
+                           (= 'da' if already_anomalies=True, else computed)
         'annual'         : annual means (year coordinate)
         'seasonal'       : seasonal means, if season_months given
         'gm'             : global mean time series, if subtract_gm=True
         'annual_no_gm'   : annual means with GW removed, if subtract_gm=True
         'seasonal_no_gm' : seasonal means with GW removed, if subtract_gm=True
 
+    Dataset-specific usage
+    ----------------------
+    SST ERSSTv5  → preprocess('sst.nc', var='sst', ref_period=..., subtract_gm=True)
+    SLP NCEP     → preprocess('slp.nc', var='slp', ref_period=...)
+    GPCP Precip  → preprocess('precip.nc', var='precip', ref_period=...)
+    GISTEMP SAT  → preprocess('sat.nc', var='air', already_anomalies=True)
+    Berkeley E.  → use load_berkeley_earth() directly (handles decimal time)
+
     Note on global-mean removal
     ---------------------------
     The global mean is computed from the FULL spatial domain (before lat/lon
-    subsetting), exactly as in the original code.  This ensures that the
-    removed signal is a true global-ocean warming trend, not a regional mean.
-    Applying the spatial subset first would leave a residual regional trend
-    in the data and distort the leading EOFs.
+    subsetting) to ensure it captures the global warming signal, not a
+    regional mean that would leave a residual trend in the data.
     """
     # 1. Load
     ds = load_nc(path, var=var, squeeze=squeeze)
@@ -392,12 +544,23 @@ def preprocess(
     # 7. Temporal subset only (lat/lon subset comes AFTER global-mean removal)
     da_full = subset(da_full, time=time)
 
-    # 8. Anomalies on full spatial domain
-    anom_full = anomalies(da_full, ref_period=ref_period)
+    # 8. Anomalies (or pass-through if data is already anomalies)
+    if already_anomalies:
+        # Data is already an anomaly field — do NOT call anomalies() again.
+        # This applies to: GISTEMP SAT, Berkeley Earth, and any other
+        # pre-processed anomaly dataset.
+        anom_full = da_full
+        anom_full.attrs = {
+            **da_full.attrs,
+            "description": "Monthly anomalies (pre-computed in source dataset)",
+        }
+    else:
+        # Raw data → compute anomalies from climatology
+        anom_full = anomalies(da_full, ref_period=ref_period)
+
     anom_full = drop_sparse_gridpoints(anom_full, max_nan_fraction=max_nan_fraction)
 
     # 9. Global-mean removal — must happen before spatial subset
-    #    so that gm is a true global (or full-domain) ocean mean, not a regional one.
     gm = None
     if subtract_gm:
         ann_full = annual_means(anom_full)
@@ -408,9 +571,9 @@ def preprocess(
             ann_for_gm = ann_for_gm.sel(
                 year=slice(int(gm_period[0][:4]), int(gm_period[1][:4]))
             )
-        gm = global_mean(ann_for_gm)   # unweighted — matches original code
+        gm = global_mean(ann_for_gm)   # lat-weighted (default)
 
-    # 10. Now apply spatial subset
+    # 10. Apply spatial subset
     da   = subset(da_full,   lat=lat, lon=lon)
     anom = subset(anom_full, lat=lat, lon=lon)
 
@@ -425,9 +588,6 @@ def preprocess(
                                      max_nan_fraction=max_nan_fraction)
         out["annual"] = ann
         if subtract_gm:
-            # Subtract the global mean (computed from full domain above)
-            # from the regional annual means — same as original:
-            #   Xmammg = Xma_zone - Xmg_global
             out["annual_no_gm"] = subtract_global_mean(ann, gm, dim="year")
 
     # 12. Seasonal means on subsetted domain
@@ -437,7 +597,6 @@ def preprocess(
                                       max_nan_fraction=max_nan_fraction)
         out["seasonal"] = seas
         if subtract_gm:
-            # For seasonal: compute seasonal gm from full domain, then subtract
             seas_full = seasonal_means(anom_full, months=season_months)
             seas_full = drop_sparse_gridpoints(seas_full, dim="year",
                                                max_nan_fraction=max_nan_fraction)

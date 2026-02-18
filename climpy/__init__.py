@@ -59,6 +59,7 @@ from .style import (
 from .data import (
     preprocess,
     load_nc,
+    load_berkeley_earth,
     fix_time,
     standardise_coords,
     set_lon_convention,
@@ -108,7 +109,7 @@ __all__ = [
     "AMS_1COL", "AMS_2COL",
     # Data
     "preprocess",
-    "load_nc", "fix_time", "standardise_coords",
+    "load_nc", "load_berkeley_earth", "fix_time", "standardise_coords",
     "set_lon_convention", "mask_fill_values",
     "subset", "reduce_resolution",
     "anomalies", "annual_means", "seasonal_means",
