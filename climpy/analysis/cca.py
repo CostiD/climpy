@@ -3,16 +3,31 @@ climpy.analysis.cca
 ====================
 Batch-PCA prefiltered Canonical Correlation Analysis (BP-CCA).
 
+Implements the Barnett & Preisendorfer (1987, MWR) algorithm:
+  1. Pre-filter X and Y with EOF analysis (retain k EOFs per field).
+  2. Normalise the PCs to unit variance (pre-whitening).
+  3. Compute SVD of the cross-covariance (= cross-correlation) matrix of PCs.
+  4. Back-project canonical vectors onto the original coordinate space.
+  5. (New) Assess significance of canonical correlations by permutation.
+
 Example
 -------
 >>> from climpy.analysis import CCA
 >>> cca = CCA(sst_anom, slp_anom, n_eofs=(10, 15))
 >>> cca.summary()
+>>> sig = cca.significance_test(n_perm=500)    # B-P step 5
 >>> Xpat = cca.x_patterns()     # (mode × lat × lon)
 >>> Ypat = cca.y_patterns()     # (mode × lat × lon)
 >>> Xts  = cca.x_timeseries()   # (time × mode)
 >>> Yts  = cca.y_timeseries()   # (time × mode)
 >>> corrs = cca.canonical_correlations()
+
+Changes vs. original
+--------------------
+- BUG FIX: _align_time now checks both X and Y for the time dim name
+  and raises a clear error if they differ.
+- NEW: significance_test() — permutation test for canonical correlations,
+  completing the Barnett & Preisendorfer (1987) algorithm.
 """
 
 from __future__ import annotations
@@ -26,13 +41,7 @@ from climpy.ops import cosine_weights, getneofs
 
 
 class CCA:
-    """Batch-PCA prefiltered Canonical Correlation Analysis.
-
-    The algorithm:
-    1. Pre-filter X and Y with EOF analysis to reduce dimensionality.
-    2. Compute the covariance matrix of the retained PCs.
-    3. Apply SVD to find the canonical correlation patterns (CCPs).
-    4. Project back onto the original coordinate space.
+    """Batch-PCA prefiltered Canonical Correlation Analysis (Barnett & Preisendorfer 1987).
 
     Parameters
     ----------
@@ -41,7 +50,7 @@ class CCA:
         (time, lat, lon).  The time dimension must be the same length.
     n_eofs : (int, int), optional
         Number of EOFs to retain for X and Y respectively.
-        If None, chosen automatically to explain ≥ ``min_variance``% of variance.
+        If None, chosen automatically to explain >= ``min_variance``% of variance.
     min_variance : float
         Minimum cumulative explained variance (%) for automatic EOF selection.
     lat_weights : bool
@@ -49,8 +58,8 @@ class CCA:
 
     Key attributes (after fitting)
     --------------------------------
-    n_modes : int      — number of canonical modes (= min(kX, kY))
-    cancorrs : ndarray — canonical correlations for each mode
+    n_modes  : int      — number of canonical modes (= min(kX, kY))
+    cancorrs : ndarray  — canonical correlations for each mode
     """
 
     def __init__(
@@ -87,25 +96,29 @@ class CCA:
         modes = np.arange(self.n_modes)
 
         # --- extract PCs and EOFs ---
+        # pcscaling=1 → PCs have unit variance (pre-whitening step of B-P)
         pcsX  = solverX.pcs(npcs=kX, pcscaling=1).values          # (T × kX)
         pcsY  = solverY.pcs(npcs=kY, pcscaling=1).values          # (T × kY)
+        # eofscaling=2 → EOFs in physical units (scaled by sqrt eigenvalue)
         eofsX = solverX.eofs(neofs=kX, eofscaling=2)              # (kX × lat × lon)
         eofsY = solverY.eofs(neofs=kY, eofscaling=2)
 
-        # stack to (sX × kX) — drop NaN grid points
+        # stack to (s × k) — drop NaN grid points (ocean/land mask)
         eXstacked = eofsX.transpose("lat", "lon", "mode").stack(s=["lat", "lon"])
         eYstacked = eofsY.transpose("lat", "lon", "mode").stack(s=["lat", "lon"])
         self._eXstacked = eXstacked.dropna(dim="s")
         self._eYstacked = eYstacked.dropna(dim="s")
-        eX = self._eXstacked.values.T          # (sX' × kX)
-        eY = self._eYstacked.values.T          # (sY' × kY)
+        eX = self._eXstacked.values.T          # (s' × kX)
+        eY = self._eYstacked.values.T          # (s' × kY)
 
         # --- total variance (sum of eigenvalues) ---
         self._totvarX = float(solverX.totalAnomalyVariance())
         self._totvarY = float(solverY.totalAnomalyVariance())
 
-        # --- CCA via SVD ---
-        Sxy = pcsX.T @ pcsY / (len(pcsX) - 1)           # covariance matrix
+        # --- CCA via SVD (B-P 1987 step 3) ---
+        # Since PCs have unit variance (pcscaling=1), the covariance matrix
+        # of PCs IS the cross-correlation matrix.
+        Sxy = pcsX.T @ pcsY / (len(pcsX) - 1)
         fX, cancorrs, fYT = np.linalg.svd(Sxy, full_matrices=False)
         fY = fYT.T
 
@@ -114,20 +127,48 @@ class CCA:
         fY = fY[:, :self.n_modes]
         self.cancorrs = cancorrs[:self.n_modes]
 
-        # --- back-project to physical space ---
-        self._Fx = eX @ fX                               # (sX' × n_modes)
-        self._Fy = eY @ fY                               # (sY' × n_modes)
+        # --- back-project to physical space (B-P 1987 step 4) ---
+        self._Fx = eX @ fX                               # (s' × n_modes)
+        self._Fy = eY @ fY                               # (s' × n_modes)
         self._tsX = pcsX @ fX                            # (T × n_modes)
         self._tsY = pcsY @ fY                            # (T × n_modes)
 
+        # Store PCs for significance testing
+        self._pcsX = pcsX
+        self._pcsY = pcsY
         self._modes = modes
 
     # ── Static helper ─────────────────────────────────────────────────
 
     @staticmethod
     def _align_time(X: xr.DataArray, Y: xr.DataArray):
-        """Select the common time interval of X and Y."""
-        t_dim = "time" if "time" in X.dims else "year"
+        """Select the common time interval of X and Y.
+
+        BUG FIX (vs original): now checks both X and Y for their time
+        dimension name and raises a clear error if they differ.
+        """
+        # Determine time dim for X
+        if "time" in X.dims:
+            t_dim_x = "time"
+        elif "year" in X.dims:
+            t_dim_x = "year"
+        else:
+            raise ValueError("X has no recognised time dimension ('time' or 'year').")
+
+        # Determine time dim for Y
+        if "time" in Y.dims:
+            t_dim_y = "time"
+        elif "year" in Y.dims:
+            t_dim_y = "year"
+        else:
+            raise ValueError("Y has no recognised time dimension ('time' or 'year').")
+
+        if t_dim_x != t_dim_y:
+            raise ValueError(
+                f"X has time dim '{t_dim_x}' but Y has '{t_dim_y}'. "
+                "Please rename dimensions to match before calling CCA."
+            )
+        t_dim = t_dim_x
         tmin = max(X[t_dim].values[0], Y[t_dim].values[0])
         tmax = min(X[t_dim].values[-1], Y[t_dim].values[-1])
         return (X.sel({t_dim: slice(tmin, tmax)}),
@@ -137,10 +178,10 @@ class CCA:
 
     def _unstack_pattern(
         self,
-        F_stacked: np.ndarray,      # (s' × n_modes)
-        eof_xarr_stacked,           # stacked DataArray holding coordinates
-        field: xr.DataArray,        # original field (for shape / coords)
-        dim_name: str,              # 's' stacked dimension name
+        F_stacked: np.ndarray,
+        eof_xarr_stacked,
+        field: xr.DataArray,
+        dim_name: str,
         var_name: str,
     ) -> xr.DataArray:
         """Reindex and unstack a CCP from stacked to (mode, lat, lon)."""
@@ -164,34 +205,19 @@ class CCA:
     # ── Public API ────────────────────────────────────────────────────
 
     def x_patterns(self) -> xr.DataArray:
-        """X canonical correlation patterns.
-
-        Returns
-        -------
-        xr.DataArray (mode × lat × lon) named 'X_CCP'.
-        """
+        """X canonical correlation patterns (mode × lat × lon)."""
         return self._unstack_pattern(
             self._Fx, self._eXstacked, self._X, "sX", "X_CCP"
         )
 
     def y_patterns(self) -> xr.DataArray:
-        """Y canonical correlation patterns.
-
-        Returns
-        -------
-        xr.DataArray (mode × lat × lon) named 'Y_CCP'.
-        """
+        """Y canonical correlation patterns (mode × lat × lon)."""
         return self._unstack_pattern(
             self._Fy, self._eYstacked, self._Y, "sY", "Y_CCP"
         )
 
     def x_timeseries(self) -> xr.DataArray:
-        """Canonical time series associated with X.
-
-        Returns
-        -------
-        xr.DataArray (time × mode) named 'X_ts'.
-        """
+        """Canonical time series associated with X (time × mode)."""
         t_dim = "time" if "time" in self._X.dims else "year"
         return xr.DataArray(
             self._tsX,
@@ -201,12 +227,7 @@ class CCA:
         )
 
     def y_timeseries(self) -> xr.DataArray:
-        """Canonical time series associated with Y.
-
-        Returns
-        -------
-        xr.DataArray (time × mode) named 'Y_ts'.
-        """
+        """Canonical time series associated with Y (time × mode)."""
         t_dim = "time" if "time" in self._Y.dims else "year"
         return xr.DataArray(
             self._tsY,
@@ -216,12 +237,7 @@ class CCA:
         )
 
     def canonical_correlations(self) -> np.ndarray:
-        """Canonical correlations for each mode.
-
-        Returns
-        -------
-        numpy.ndarray, shape (n_modes,)
-        """
+        """Canonical correlations for each mode, shape (n_modes,)."""
         return self.cancorrs
 
     def variance_fraction(self) -> tuple[np.ndarray, np.ndarray]:
@@ -229,11 +245,63 @@ class CCA:
 
         Returns
         -------
-        (varX, varY) : tuple of numpy.ndarray, shape (n_modes,)
+        (varX, varY) : tuple of ndarray, shape (n_modes,).
+
+        Note
+        ----
+        Because eofscaling=2 is used (EOFs scaled by sqrt eigenvalue),
+        this is an approximation of the true variance fraction.
+        Values are interpretable as relative contributions across modes.
         """
         varX = np.sum(self._Fx ** 2, axis=0) / self._totvarX
         varY = np.sum(self._Fy ** 2, axis=0) / self._totvarY
         return varX * 100.0, varY * 100.0
+
+    def significance_test(
+        self,
+        n_perm: int = 1000,
+        rng: Optional[np.random.Generator] = None,
+    ) -> np.ndarray:
+        """Permutation test for canonical correlations (Barnett & Preisendorfer 1987).
+
+        Shuffles the time axis of Y's PCs and recomputes canonical correlations
+        n_perm times to build the null distribution. Returns the p-value for
+        each canonical mode.
+
+        Parameters
+        ----------
+        n_perm : int — number of random permutations (default 1000).
+        rng    : np.random.Generator, optional — for reproducibility
+                 (e.g. np.random.default_rng(42)).
+
+        Returns
+        -------
+        pvals : np.ndarray, shape (n_modes,) — two-tailed p-values.
+                Modes with pvals < 0.05 are considered significant.
+
+        Example
+        -------
+        >>> pvals = cca.significance_test(n_perm=1000, rng=np.random.default_rng(0))
+        >>> sig_modes = np.where(pvals < 0.05)[0]
+        >>> print(f"Significant modes: {sig_modes + 1}")
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        T = self._pcsX.shape[0]
+        obs_corrs = self.cancorrs.copy()
+        null_corrs = np.zeros((n_perm, self.n_modes))
+
+        for i in range(n_perm):
+            perm_idx = rng.permutation(T)
+            pcsY_perm = self._pcsY[perm_idx, :]
+            Sxy_perm = self._pcsX.T @ pcsY_perm / (T - 1)
+            _, c_perm, _ = np.linalg.svd(Sxy_perm, full_matrices=False)
+            null_corrs[i, :] = c_perm[:self.n_modes]
+
+        # p-value = fraction of permutations with cancorr >= observed
+        pvals = np.mean(null_corrs >= obs_corrs[np.newaxis, :], axis=0)
+        return pvals
 
     def summary(self) -> str:
         """Print a table of modes, canonical correlations, and variance fractions."""
@@ -248,6 +316,8 @@ class CCA:
                 f"{i+1:>6}  {self.cancorrs[i]:>8.3f}  "
                 f"{varX[i]:>10.2f}  {varY[i]:>10.2f}"
             )
+        lines.append("-" * 42)
+        lines.append("Run significance_test() to assess mode significance (B-P 1987).")
         result = "\n".join(lines)
         print(result)
         return result

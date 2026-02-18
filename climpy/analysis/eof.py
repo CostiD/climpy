@@ -11,6 +11,11 @@ Example
 >>> eofs = solver.eofs()          # xr.DataArray (mode × lat × lon)
 >>> pcs  = solver.pcs()           # xr.DataArray (time × mode)
 >>> frac = solver.variance_fraction()
+
+Changes vs. original
+--------------------
+- Minor fix: fake datetime coordinate for year-based data now starts on
+  January 1 (not July 1), making date_range consistent across all periods.
 """
 from __future__ import annotations
 
@@ -49,7 +54,6 @@ class EOF:
         self._time_dim = time_dim
 
         # eofs necesită 'time' cu dtype datetime64
-        # Dacă avem 'year' (int), construim o copie temporară
         if time_dim != "time" or not np.issubdtype(
             da[time_dim].dtype, np.datetime64
         ):
@@ -59,7 +63,9 @@ class EOF:
                 dims=["time"] + [d for d in da.dims if d != time_dim],
                 coords={
                     "time": pd.date_range(
-                        start=f"{years[0]}-07-01",
+                        # FIX: start from Jan 1 (not Jul 1) so all periods
+                        # are exactly 12 months and date_range is consistent.
+                        start=f"{years[0]}-01-01",
                         periods=len(years),
                         freq="YS",
                     ),
@@ -89,12 +95,18 @@ class EOF:
             self.n_eofs = n_eofs
 
     def eofs(self, n: int = None, scaling: int = 2) -> xr.DataArray:
-        """Returnează pattern-urile EOF (mode × lat × lon)."""
+        """Returnează pattern-urile EOF (mode × lat × lon).
+
+        scaling=2: EOFs scalate cu sqrt(eigenvalue) → unități fizice ale datelor.
+        """
         n = n or self.n_eofs
         return self.solver.eofs(neofs=n, eofscaling=scaling)
 
     def pcs(self, n: int = None, scaling: int = 1) -> xr.DataArray:
-        """Returnează seriile de timp PC (time × mode)."""
+        """Returnează seriile de timp PC (time × mode).
+
+        scaling=1: PCs normalizate la varianță unitară (std ≈ 1).
+        """
         n = n or self.n_eofs
         return self.solver.pcs(npcs=n, pcscaling=scaling)
 
