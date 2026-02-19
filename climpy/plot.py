@@ -463,16 +463,15 @@ class ClimPlot:
         lon: np.ndarray,
         pthresh: float = 0.05,
         density: int = 2,
-        color: str = "#222222",
-        size: float = 2.5,
-        marker: str = "x",
+        color: str = "#111111",
+        size: float = 3.5,
+        marker: str = ".",
         zorder: int = 6,
     ) -> "ClimPlot":
         """Stipple grid points where p < pthresh.
 
-        Default marker changed to 'x' (size=2.5) — the cross marker is the
-        standard in climate publications (e.g. Hartmann 2015) and is clearly
-        visible at typical journal print sizes, unlike the original dot marker.
+        Uses filled dot marker ('.'). Do NOT use 'x' here — 'x' is drawn
+        with lines, and linewidths=0 makes it completely invisible.
         """
         sig = pvalues < pthresh
         ii, jj = np.where(sig)
@@ -483,7 +482,7 @@ class ClimPlot:
         ax.scatter(
             lon_pts, lat_pts, s=size, c=color, marker=marker,
             transform=self._transf, zorder=zorder,
-            linewidths=0, alpha=0.65,
+            linewidths=0, alpha=0.75,
         )
         return self
 
